@@ -116,10 +116,11 @@ local function triggerJumpscare(players)
 		print("Jumpscare triggered for", player.Name)
 	end
 	
-	-- Reset flag after a delay
+	-- Reset flag after room check is completely done (longer delay)
 	spawn(function()
-		wait(5)
+		wait(15) -- Increased from 5 to 15 seconds
 		jumpscareTriggered = false
+		print("Jumpscare cooldown reset")
 	end)
 end
 
@@ -165,122 +166,104 @@ local function completeRoomCheck()
 	scheduleNextMovement()
 end
 
--- Function to perform room check (COMPLETELY REWRITTEN)
+-- Function to perform room check (SIMPLIFIED SEQUENTIAL APPROACH)
 local function performRoomCheck()
 	print("=== PERFORMING ROOM CHECK ===")
 	print("Patrols completed before room check:", patrolsCompleted)
 	isCheckingRoom = true
+	fatherMoving = true
 	
 	-- Clean up any existing connections first
 	cleanupConnections()
 	
-	-- First teleport to outside room (waypoint 6)
-	print("Teleporting to room entrance...")
-	teleportFatherTo(6) -- Teleport to danger zone
-	updateFatherPosition:FireAllClients(waypoints[6], true) -- Send danger warning
-	
-	-- Wait 3 seconds for tension
+	-- Use spawn to run the entire sequence without blocking
 	spawn(function()
-		wait(3)
+		-- Step 1: Teleport to danger zone
+		print("Step 1: Moving to danger zone...")
+		teleportFatherTo(6)
+		updateFatherPosition:FireAllClients(waypoints[6], true)
+		wait(3) -- Tension building
 		
 		if not gameActive or not isCheckingRoom then 
-			print("Room check cancelled")
+			print("Room check cancelled during step 1")
+			completeRoomCheck()
 			return 
 		end
 		
-		print("Starting room entry sequence...")
-		fatherMoving = true
-		
-		-- Step 1: Move to room entrance (waypoint 7)
+		-- Step 2: Move to room entrance
+		print("Step 2: Moving to room entrance...")
 		fatherHumanoid:MoveTo(waypoints[7])
 		
-		local roomEntryCompleted = false
-		local enterConnection = fatherHumanoid.MoveToFinished:Connect(function(reached)
-			if roomEntryCompleted then return end -- Prevent multiple executions
-			roomEntryCompleted = true
-			
-			print("Father entered room entrance!")
-			
-			-- Immediately send "IN YOUR ROOM" signal
-			updateFatherPosition:FireAllClients(ROOM_CENTER, true)
-			
-			-- Step 2: Move to room center (waypoint 8)
-			fatherHumanoid:MoveTo(waypoints[8])
-			
-			local roomCenterCompleted = false
-			local centerConnection = fatherHumanoid.MoveToFinished:Connect(function(reachedCenter)
-				if roomCenterCompleted then return end -- Prevent multiple executions
-				roomCenterCompleted = true
-				
-				print("Father reached room center!")
-				
-				-- Give players a moment to react
-				wait(1)
-				
-				-- Check player status
-				local playersInBed, playersAwake = getPlayersInBed()
-				
-				if #playersAwake > 0 then
-					print("Players caught awake:", #playersAwake)
-					triggerJumpscare(playersAwake)
-				else
-					print("All players safe in bed")
-				end
-				
-				-- Wait then leave
-				wait(2)
-				print("Father leaving room...")
-				
-				-- Teleport back outside
-				teleportFatherTo(6)
-				wait(1)
-				
-				-- Complete the room check
-				completeRoomCheck()
-			end)
-			
-			-- Add to active connections for cleanup
-			table.insert(activeConnections, centerConnection)
-			
-			-- Timeout for center movement (8 seconds)
-			spawn(function()
-				wait(8)
-				if not roomCenterCompleted then
-					print("Center movement timed out")
-					roomCenterCompleted = true
-					
-					-- Still do the check
-					local playersInBed, playersAwake = getPlayersInBed()
-					if #playersAwake > 0 then
-						print("Players caught awake (timeout):", #playersAwake)
-						triggerJumpscare(playersAwake)
-					else
-						print("All players safe in bed (timeout)")
-					end
-					
-					-- Leave and complete
-					teleportFatherTo(1)
-					wait(1)
-					completeRoomCheck()
-				end
-			end)
+		-- Wait for movement to complete OR timeout
+		local moveStarted = tick()
+		local reached = false
+		local connection = fatherHumanoid.MoveToFinished:Connect(function()
+			reached = true
 		end)
 		
-		-- Add to active connections for cleanup
-		table.insert(activeConnections, enterConnection)
+		-- Wait up to 10 seconds for movement
+		while not reached and (tick() - moveStarted) < 10 and gameActive and isCheckingRoom do
+			wait(0.1)
+		end
 		
-		-- Timeout for room entry (10 seconds)
-		spawn(function()
-			wait(10)
-			if not roomEntryCompleted then
-				print("Room entry timed out")
-				roomEntryCompleted = true
-				
-				-- Teleport away and complete
-				teleportFatherTo(1)
-				completeRoomCheck()
-			end
+		connection:Disconnect()
+		
+		if not gameActive or not isCheckingRoom then 
+			print("Room check cancelled during step 2")
+			completeRoomCheck()
+			return 
+		end
+		
+		print("Step 3: Announcing room invasion...")
+		updateFatherPosition:FireAllClients(ROOM_CENTER, true) -- "IN YOUR ROOM!" signal
+		wait(1)
+		
+		-- Step 4: Move to room center
+		print("Step 4: Moving to room center...")
+		fatherHumanoid:MoveTo(waypoints[8])
+		
+		-- Wait for center movement OR timeout
+		moveStarted = tick()
+		reached = false
+		connection = fatherHumanoid.MoveToFinished:Connect(function()
+			reached = true
 		end)
+		
+		-- Wait up to 8 seconds for center movement
+		while not reached and (tick() - moveStarted) < 8 and gameActive and isCheckingRoom do
+			wait(0.1)
+		end
+		
+		connection:Disconnect()
+		
+		if not gameActive or not isCheckingRoom then 
+			print("Room check cancelled during step 4")
+			completeRoomCheck()
+			return 
+		end
+		
+		-- Step 5: Check players and potentially trigger jumpscare
+		print("Step 5: Checking player status...")
+		wait(1) -- Give players a moment
+		
+		local playersInBed, playersAwake = getPlayersInBed()
+		
+		if #playersAwake > 0 then
+			print("Players caught awake:", #playersAwake)
+			triggerJumpscare(playersAwake)
+		else
+			print("All players safe in bed")
+		end
+		
+		-- Step 6: Leave room
+		print("Step 6: Father leaving room...")
+		wait(2) -- Dramatic pause
+		teleportFatherTo(6) -- Back to outside room
+		wait(1)
+		
+		-- Step 7: Complete room check
+		print("Step 7: Completing room check...")
+		completeRoomCheck()
 	end)
 end
 
