@@ -1,4 +1,4 @@
--- Enhanced Horror Game Server Script (FIXED JUMPSCARE SPAM)
+-- Enhanced Horror Game Server Script (FIXED CRITICAL BUGS)
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -62,7 +62,6 @@ local currentPatrol = 1
 local currentPatrolStep = 1
 local patrolsCompleted = 0
 local isCheckingRoom = false
-local jumpscareTriggered = false -- NEW: Prevent multiple jumpscares
 
 -- Forward declare the function
 local scheduleNextMovement
@@ -103,7 +102,8 @@ local function getPlayersInBed()
 	return playersInBed, playersAwake
 end
 
--- Function to trigger jumpscare for specific players (FIXED)
+-- Function to trigger jumpscare for specific players (ONLY ONCE)
+local jumpscareTriggered = false
 local function triggerJumpscare(players)
 	if jumpscareTriggered then 
 		print("Jumpscare already triggered, skipping")
@@ -111,18 +111,15 @@ local function triggerJumpscare(players)
 	end
 	
 	jumpscareTriggered = true
-	print("TRIGGERING JUMPSCARE FOR", #players, "PLAYERS")
-	
 	for _, player in pairs(players) do
 		jumpscareEvent:FireClient(player)
-		print("Jumpscare sent to", player.Name)
+		print("Jumpscare triggered for", player.Name)
 	end
 	
-	-- Reset after 5 seconds
+	-- Reset flag after a delay
 	spawn(function()
 		wait(5)
 		jumpscareTriggered = false
-		print("Jumpscare cooldown finished")
 	end)
 end
 
@@ -143,17 +140,16 @@ local function teleportFatherTo(waypointIndex)
 	print("Father teleported successfully!")
 end
 
--- Function to complete room check and continue
+-- Function to complete room check and reset state
 local function completeRoomCheck()
 	print("=== COMPLETING ROOM CHECK ===")
 	
 	-- Clean up any remaining connections
 	cleanupConnections()
 	
-	-- Reset states
+	-- Reset state
 	isCheckingRoom = false
 	fatherMoving = false
-	jumpscareTriggered = false
 	
 	-- Reset patrol after room check
 	patrolsCompleted = 0
@@ -173,12 +169,10 @@ end
 local function performRoomCheck()
 	print("=== PERFORMING ROOM CHECK ===")
 	print("Patrols completed before room check:", patrolsCompleted)
+	isCheckingRoom = true
 	
 	-- Clean up any existing connections first
 	cleanupConnections()
-	
-	isCheckingRoom = true
-	jumpscareTriggered = false
 	
 	-- First teleport to outside room (waypoint 6)
 	print("Teleporting to room entrance...")
@@ -189,109 +183,110 @@ local function performRoomCheck()
 	spawn(function()
 		wait(3)
 		
-		-- Now PATHFIND into the room (only time we pathfind)
-		print("Pathfinding into room...")
+		if not gameActive or not isCheckingRoom then 
+			print("Room check cancelled")
+			return 
+		end
+		
+		print("Starting room entry sequence...")
 		fatherMoving = true
 		
-		-- Move to room entrance first
+		-- Step 1: Move to room entrance (waypoint 7)
 		fatherHumanoid:MoveTo(waypoints[7])
 		
-		local enterConnection
-		enterConnection = fatherHumanoid.MoveToFinished:Connect(function(reached)
-			print("Father reached room entrance!")
+		local roomEntryCompleted = false
+		local enterConnection = fatherHumanoid.MoveToFinished:Connect(function(reached)
+			if roomEntryCompleted then return end -- Prevent multiple executions
+			roomEntryCompleted = true
 			
-			-- Immediately disconnect to prevent multiple calls
-			enterConnection:Disconnect()
-			enterConnection = nil
+			print("Father entered room entrance!")
 			
 			-- Immediately send "IN YOUR ROOM" signal
 			updateFatherPosition:FireAllClients(ROOM_CENTER, true)
 			
-			-- Small delay then move to center
-			spawn(function()
-				wait(1)
-				print("Moving to room center...")
-				fatherHumanoid:MoveTo(waypoints[8]) -- Room center
+			-- Step 2: Move to room center (waypoint 8)
+			fatherHumanoid:MoveTo(waypoints[8])
+			
+			local roomCenterCompleted = false
+			local centerConnection = fatherHumanoid.MoveToFinished:Connect(function(reachedCenter)
+				if roomCenterCompleted then return end -- Prevent multiple executions
+				roomCenterCompleted = true
 				
-				local centerConnection
-				centerConnection = fatherHumanoid.MoveToFinished:Connect(function(reachedCenter)
-					print("Father reached room center!")
+				print("Father reached room center!")
+				
+				-- Give players a moment to react
+				wait(1)
+				
+				-- Check player status
+				local playersInBed, playersAwake = getPlayersInBed()
+				
+				if #playersAwake > 0 then
+					print("Players caught awake:", #playersAwake)
+					triggerJumpscare(playersAwake)
+				else
+					print("All players safe in bed")
+				end
+				
+				-- Wait then leave
+				wait(2)
+				print("Father leaving room...")
+				
+				-- Teleport back outside
+				teleportFatherTo(6)
+				wait(1)
+				
+				-- Complete the room check
+				completeRoomCheck()
+			end)
+			
+			-- Add to active connections for cleanup
+			table.insert(activeConnections, centerConnection)
+			
+			-- Timeout for center movement (8 seconds)
+			spawn(function()
+				wait(8)
+				if not roomCenterCompleted then
+					print("Center movement timed out")
+					roomCenterCompleted = true
 					
-					-- Immediately disconnect to prevent multiple calls
-					centerConnection:Disconnect()
-					centerConnection = nil
-					
-					-- Give players a moment to react
-					wait(1)
-					
-					-- Check player status ONCE
+					-- Still do the check
 					local playersInBed, playersAwake = getPlayersInBed()
-					print("Players in bed:", #playersInBed, "Players awake:", #playersAwake)
-					
 					if #playersAwake > 0 then
-						-- CAUGHT! Trigger jumpscare
-						print("Players caught awake!")
+						print("Players caught awake (timeout):", #playersAwake)
 						triggerJumpscare(playersAwake)
 					else
-						print("All players safe in bed")
+						print("All players safe in bed (timeout)")
 					end
 					
-					-- Wait then leave
-					wait(3)
-					print("Father leaving room...")
-					
-					-- Teleport back outside
-					teleportFatherTo(6)
-					
+					-- Leave and complete
+					teleportFatherTo(1)
 					wait(1)
-					
-					-- Complete the room check
 					completeRoomCheck()
-				end)
-				
-				-- Timeout for center movement
-				spawn(function()
-					wait(10)
-					if centerConnection then
-						print("Center movement timed out")
-						centerConnection:Disconnect()
-						centerConnection = nil
-						
-						-- Still check players
-						local playersInBed, playersAwake = getPlayersInBed()
-						if #playersAwake > 0 then
-							triggerJumpscare(playersAwake)
-						end
-						
-						-- Complete room check
-						wait(2)
-						completeRoomCheck()
-					end
-				end)
+				end
 			end)
 		end)
 		
-		-- Timeout for room entry
+		-- Add to active connections for cleanup
+		table.insert(activeConnections, enterConnection)
+		
+		-- Timeout for room entry (10 seconds)
 		spawn(function()
-			wait(15)
-			if enterConnection then
+			wait(10)
+			if not roomEntryCompleted then
 				print("Room entry timed out")
-				enterConnection:Disconnect()
-				enterConnection = nil
+				roomEntryCompleted = true
 				
-				-- Complete room check
+				-- Teleport away and complete
+				teleportFatherTo(1)
 				completeRoomCheck()
 			end
 		end)
 	end)
 end
 
--- Function to schedule next movement
+-- Function to schedule next movement (FIXED)
 scheduleNextMovement = function()
-	if movementDebounce then 
-		print("Movement already debounced, skipping")
-		return 
-	end
+	if movementDebounce then return end
 	movementDebounce = true
 	
 	print("Scheduling next movement...")
@@ -303,13 +298,11 @@ scheduleNextMovement = function()
 		
 		if gameActive and not fatherMoving and not isCheckingRoom then
 			chooseFatherNextMove()
-		else
-			print("Cannot schedule - gameActive:", gameActive, "fatherMoving:", fatherMoving, "isCheckingRoom:", isCheckingRoom)
 		end
 	end)
 end
 
--- Enhanced movement selection (with teleports)
+-- SIMPLE Enhanced movement selection (with teleports)
 function chooseFatherNextMove()
 	if not gameActive or fatherMoving or isCheckingRoom then 
 		print("Cannot choose next move - gameActive:", gameActive, "fatherMoving:", fatherMoving, "isCheckingRoom:", isCheckingRoom)
@@ -381,18 +374,26 @@ Players.PlayerAdded:Connect(function(player)
 				print("gameActive:", gameActive)
 				print("fatherMoving:", fatherMoving)
 				print("isCheckingRoom:", isCheckingRoom)
-				print("jumpscareTriggered:", jumpscareTriggered)
 				print("currentPatrol:", currentPatrol)
 				print("currentPatrolStep:", currentPatrolStep)
 				print("patrolsCompleted:", patrolsCompleted)
+				print("jumpscareTriggered:", jumpscareTriggered)
 				print("activeConnections:", #activeConnections)
 				print("Father position:", fatherRootPart.Position)
-			elseif message:lower() == "/cleanup" then
-				print("Manual cleanup triggered")
-				cleanupConnections()
 			elseif message:lower() == "/forceroom" then
 				print("FORCING ROOM CHECK")
 				patrolsCompleted = 2
+				chooseFatherNextMove()
+			elseif message:lower() == "/reset" then
+				print("RESETTING GAME STATE")
+				cleanupConnections()
+				isCheckingRoom = false
+				fatherMoving = false
+				movementDebounce = false
+				jumpscareTriggered = false
+				patrolsCompleted = 0
+				currentPatrol = 1
+				currentPatrolStep = 1
 				chooseFatherNextMove()
 			elseif message:lower():sub(1, 3) == "/tp" then
 				local waypointNum = tonumber(message:lower():sub(5))
@@ -409,8 +410,8 @@ end)
 spawn(function()
 	print("=== INITIALIZING FIXED HORROR GAME ===")
 	wait(math.random(3, 5))
-	print("Starting patrol system...")
+	print("Starting teleport patrol system...")
 	chooseFatherNextMove()
 end)
 
-print("FIXED Horror game initialized - No more jumpscare spam!")
+print("FIXED Horror game initialized with proper connection management!")
